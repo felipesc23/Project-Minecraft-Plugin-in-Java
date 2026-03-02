@@ -1,0 +1,230 @@
+package com.GBIT.chestProject;
+
+import org.bukkit.*;
+import org.bukkit.block.*;
+import org.bukkit.command.*;
+import org.bukkit.configuration.file.*;
+import org.bukkit.entity.Player;
+import org.bukkit.event.*;
+import org.bukkit.inventory.*;
+import org.bukkit.plugin.java.JavaPlugin;
+
+import java.io.*;
+import java.util.*;
+
+public class ChestProject extends JavaPlugin implements Listener, CommandExecutor {
+
+    private final Map<String, ItemStack[]> savedChests = new HashMap<>();
+    private FileConfiguration chestData;
+    private File chestFile;
+
+    @Override
+    public void onEnable() {
+        getServer().getPluginManager().registerEvents(this, this);
+
+        getCommand("savechest").setExecutor(this);
+        getCommand("loadchest").setExecutor(this);
+        getCommand("removeall").setExecutor(this);
+        getCommand("reloadall").setExecutor(this);
+        getCommand("removechest").setExecutor(this);
+        loadChestData();
+    }
+
+    private void loadChestData() {
+        chestFile = new File(getDataFolder(), "chests.yml");
+        if (!chestFile.exists()) {
+            try {
+                chestFile.getParentFile().mkdirs();
+                chestFile.createNewFile();
+            } catch (IOException e) {
+                getLogger().severe("Erro ao criar chests.yml: " + e.getMessage());
+            }
+        }
+
+        chestData = YamlConfiguration.loadConfiguration(chestFile);
+        savedChests.clear();
+
+        if (chestData.contains("chests")) {
+            for (String key : chestData.getConfigurationSection("chests").getKeys(false)) {
+                String path = "chests." + key;
+                List<?> itemList = chestData.getList(path + ".contents");
+                ItemStack[] contents = new ItemStack[27];
+
+                if (itemList != null) {
+                    for (int i = 0; i < itemList.size() && i < contents.length; i++) {
+                        Object itemObj = itemList.get(i);
+                        if (itemObj instanceof ItemStack) {
+                            contents[i] = (ItemStack) itemObj;
+                        }
+                    }
+                }
+
+                savedChests.put(key, contents);
+            }
+        }
+    }
+
+    private String generateKey(String world, int x, int y, int z) {
+        return world + "," + x + "," + y + "," + z;
+    }
+
+    private Location getLocationFromKey(String key) {
+        String[] parts = key.split(",");
+        World world = Bukkit.getWorld(parts[0]);
+        int x = Integer.parseInt(parts[1]);
+        int y = Integer.parseInt(parts[2]);
+        int z = Integer.parseInt(parts[3]);
+        return new Location(world, x, y, z);
+    }
+
+    @Override
+    public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage(ChatColor.RED + "Apenas jogadores podem usar este comando!");
+            return true;
+        }
+
+        Player player = (Player) sender;
+        String cmdName = cmd.getName().toLowerCase();
+
+        switch (cmdName) {
+            case "savechest":
+                if (args.length < 3) {
+                    player.sendMessage(ChatColor.RED + "Uso: /savechest <x> <y> <z>");
+                    return true;
+                }
+
+                try {
+                    int x = Integer.parseInt(args[0]);
+                    int y = Integer.parseInt(args[1]);
+                    int z = Integer.parseInt(args[2]);
+                    Location loc = new Location(player.getWorld(), x, y, z);
+                    Block block = loc.getBlock();
+
+                    if (!(block.getState() instanceof Chest)) {
+                        player.sendMessage(ChatColor.RED + "Não há um baú nessas coordenadas!");
+                        return true;
+                    }
+
+                    Chest chest = (Chest) block.getState();
+                    ItemStack[] contents = chest.getInventory().getContents();
+                    String key = generateKey(loc.getWorld().getName(), x, y, z);
+
+                    chestData.set("chests." + key + ".world", loc.getWorld().getName());
+                    chestData.set("chests." + key + ".x", x);
+                    chestData.set("chests." + key + ".y", y);
+                    chestData.set("chests." + key + ".z", z);
+                    chestData.set("chests." + key + ".contents", Arrays.asList(contents));
+
+                    chestData.save(chestFile);
+                    loadChestData(); // Atualiza o mapa
+                    player.sendMessage(ChatColor.GREEN + "Baú salvo com sucesso!");
+                } catch (Exception e) {
+                    player.sendMessage(ChatColor.RED + "Erro ao salvar baú!");
+                    e.printStackTrace();
+                }
+                return true;
+
+            case "loadchest":
+                if (args.length < 3) {
+                    player.sendMessage(ChatColor.RED + "Uso: /loadchest <x> <y> <z>");
+                    return true;
+                }
+
+                try {
+                    int x = Integer.parseInt(args[0]);
+                    int y = Integer.parseInt(args[1]);
+                    int z = Integer.parseInt(args[2]);
+                    String key = generateKey(player.getWorld().getName(), x, y, z);
+                    ItemStack[] contents = savedChests.get(key);
+
+                    if (contents == null) {
+                        player.sendMessage(ChatColor.RED + "Nenhum baú salvo nessa posição!");
+                        return true;
+                    }
+
+                    Location loc = new Location(player.getWorld(), x, y, z);
+                    Block block = loc.getBlock();
+                    if (!(block.getState() instanceof Chest)) {
+                        block.setType(Material.CHEST);
+                    }
+
+                    Chest chest = (Chest) block.getState();
+                    chest.getInventory().setContents(contents);
+                    player.sendMessage(ChatColor.GREEN + "Baú carregado com sucesso!");
+                } catch (NumberFormatException e) {
+                    player.sendMessage(ChatColor.RED + "Coordenadas inválidas.");
+                }
+                return true;
+
+            case "removeall":
+                chestData.set("chests", null);
+                try {
+                    chestData.save(chestFile);
+                    savedChests.clear();
+                    player.sendMessage(ChatColor.YELLOW + "Todos os baús salvos foram removidos.");
+                } catch (IOException e) {
+                    player.sendMessage(ChatColor.RED + "Erro ao remover os baús.");
+                    e.printStackTrace();
+                }
+                return true;
+            case "removechest":
+                if (args.length < 3) {
+                    player.sendMessage(ChatColor.RED + "Uso: /removechest <x> <y> <z>");
+                    return true;
+                }
+
+                try {
+                    int x = Integer.parseInt(args[0]);
+                    int y = Integer.parseInt(args[1]);
+                    int z = Integer.parseInt(args[2]);
+                    String key = generateKey(player.getWorld().getName(), x, y, z);
+
+                    if (!savedChests.containsKey(key)) {
+                        player.sendMessage(ChatColor.RED + "Nenhum baú salvo encontrado nessas coordenadas!");
+                        return true;
+                    }
+
+                    // Remove do arquivo de configuração
+                    chestData.set("chests." + key, null);
+                    chestData.save(chestFile);
+
+                    // Remove do mapa em memória
+                    savedChests.remove(key);
+
+                    player.sendMessage(ChatColor.GREEN + "Baú removido com sucesso!");
+                } catch (NumberFormatException e) {
+                    player.sendMessage(ChatColor.RED + "Coordenadas inválidas. Use números inteiros.");
+                } catch (IOException e) {
+                    player.sendMessage(ChatColor.RED + "Erro ao salvar as alterações no arquivo.");
+                    e.printStackTrace();
+                }
+                return true;
+            case "reloadall":
+                loadChestData(); // Garante que os dados estão atualizados do arquivo
+
+                if (savedChests.isEmpty()) {
+                    player.sendMessage(ChatColor.RED + "Nenhum baú salvo.");
+                } else {
+                    int count = 0;
+                    for (String key : savedChests.keySet()) {
+                        Location loc = getLocationFromKey(key);
+                        Block block = loc.getBlock();
+                        if (!(block.getState() instanceof Chest)) {
+                            block.setType(Material.CHEST);
+                        }
+
+                        Chest chest = (Chest) block.getState();
+                        chest.getInventory().setContents(savedChests.get(key));
+                        count++;
+                    }
+
+                    player.sendMessage(ChatColor.GREEN + "Todos os " + count + " baús salvos foram carregados no mundo.");
+                }
+                return true;
+
+            default:
+                return false;
+        }
+    }
+}
