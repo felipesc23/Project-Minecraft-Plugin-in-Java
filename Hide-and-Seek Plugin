@@ -1,0 +1,324 @@
+package GBIT;
+
+import java.util.stream.Collectors;
+import me.libraryaddict.disguise.DisguiseAPI;
+import me.libraryaddict.disguise.disguisetypes.MiscDisguise;
+import me.libraryaddict.disguise.disguisetypes.DisguiseType;
+import org.bukkit.Bukkit;
+import org.bukkit.ChatColor;
+import org.bukkit.Material;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
+import org.bukkit.Location;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
+import org.bukkit.GameMode;
+import java.util.*;
+import org.bukkit.inventory.ItemStack;
+
+public class Main extends JavaPlugin implements Listener {
+
+    private List<Player> playersRestantes = new ArrayList<>();
+    private boolean jogoAtivo = false;
+    private boolean jogoPausado = false;
+    private List<Player> pegadores = new ArrayList<>();
+    private final Set<UUID> jogadoresCongelados = new HashSet<>();
+    private final List<Material> blocosPossiveis = Arrays.stream(Material.values())
+            .filter(Material::isBlock)
+            .filter(Material::isSolid)
+            .filter(mat -> mat.isOccluding())
+            .filter(mat -> mat != Material.BARRIER && mat != Material.AIR && mat != Material.STRUCTURE_VOID && mat != Material.CAVE_AIR && mat != Material.VOID_AIR)
+            .filter(mat -> !mat.name().contains("BANNER"))
+            .filter(mat -> !mat.name().contains("SHULKER_BOX"))
+            .filter(mat -> !mat.name().contains("BED"))
+            .filter(mat -> !mat.name().contains("SKULL") && !mat.name().contains("HEAD"))
+            .filter(mat -> !mat.name().contains("SIGN"))
+            .filter(mat -> !mat.name().contains("DOOR") && !mat.name().contains("TRAPDOOR") && !mat.name().contains("GATE"))
+            .filter(mat -> !mat.name().contains("FENCE") && !mat.name().contains("WALL"))
+            .filter(mat -> !mat.name().contains("GLASS_PANE") && !mat.name().contains("IRON_BARS"))
+            .filter(mat -> !mat.name().contains("PISTON"))
+            .filter(mat -> !mat.name().contains("ITEM_FRAME") && !mat.name().contains("PAINTING") && !mat.name().contains("ARMOR_STAND"))
+            .collect(Collectors.toList());
+    private int tempoRestante = 900; // 15 minutos em segundos
+    private BukkitRunnable atualizadorBlocos;
+    private BukkitRunnable atualizadorTempo;
+    private BukkitRunnable atualizadorBussola;
+
+    @Override
+    public void onEnable() {
+        getLogger().info("Plugin EscondeEsconde ativado!");
+        getServer().getPluginManager().registerEvents(this, this);
+        this.getCommand("startgame").setExecutor(this);
+        this.getCommand("stopgame").setExecutor(this);
+        this.getCommand("pausegame").setExecutor(this);
+    }
+
+    @Override
+    public void onDisable() {
+        getLogger().info("Plugin EscondeEsconde desativado!");
+        cancelarTarefas();
+    }
+
+    private void cancelarTarefas() {
+        if (atualizadorBussola != null) {
+            atualizadorBussola.cancel();
+        }
+        if (atualizadorBlocos != null) {
+            atualizadorBlocos.cancel();
+        }
+        if (atualizadorTempo != null) {
+            atualizadorTempo.cancel();
+        }
+    }
+
+    private void reiniciarJogo() {
+        cancelarTarefas();
+        jogoAtivo = false;
+        jogoPausado = false;
+        playersRestantes.clear();
+        jogadoresCongelados.clear();
+        tempoRestante = 600;
+        pegadores.clear();
+    }
+
+    private void iniciarJogo() {
+        reiniciarJogo();
+        jogoAtivo = true;
+
+        List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
+        if (online.size() < 2) {
+            Bukkit.broadcastMessage(ChatColor.RED + "É necessário pelo menos 2 jogadores.");
+            return;
+        }
+
+        // Configuração inicial do jogo
+        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "time set day");
+        online.forEach(p -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "clear " + p.getName()));
+
+        // Seleciona pegador aleatório
+        Random random = new Random();
+        Collections.shuffle(online);
+        pegadores.add(online.get(0));
+        pegadores.add(online.get(1));
+
+        playersRestantes.addAll(online);
+        playersRestantes.removeAll(pegadores);
+
+        for (Player pegador : pegadores) {
+            pegador.teleport(new Location(Bukkit.getWorld("world"), 561.95, -59.00, 803.83));
+            pegador.addPotionEffect(new PotionEffect(PotionEffectType.SLOW, 40 * 20, 20));
+            pegador.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 40 * 20, 5));
+            pegador.setGameMode(GameMode.ADVENTURE);
+            pegador.sendMessage(ChatColor.RED + "Você é um dos pegadores! Toque nos jogadores para pegá-los!");
+            pegador.getInventory().addItem(new ItemStack(Material.COMPASS));
+        }
+
+        iniciarAtualizacaoBussola();
+
+        // Configura escondedores
+        playersRestantes.forEach(p -> {
+            p.teleport(new Location(Bukkit.getWorld("world"), 464.00, -59.00, 814.56));
+            disfarcarJogador(p);
+            p.sendMessage(ChatColor.GREEN + "Você está escondido como um bloco!");
+            p.setGameMode(GameMode.ADVENTURE);
+        });
+
+        // Inicia sistemas
+        iniciarAtualizacoes();
+        iniciarAtualizacaoAutomaticaBlocos();
+
+        // Mensagem inicial
+        Bukkit.broadcastMessage(ChatColor.GOLD + "O jogo começou! Tempo restante: 10:00");
+    }
+
+    private void iniciarAtualizacaoBussola() {
+        atualizadorBussola = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (!jogoAtivo || jogoPausado || pegadores.isEmpty() || playersRestantes.isEmpty()) return;
+
+                for (Player pegador : pegadores) {
+                    Player alvoMaisProximo = null;
+                    double distanciaMaisProxima = Double.MAX_VALUE;
+
+                    for (Player escondido : playersRestantes) {
+                        double distancia = escondido.getLocation().distance(pegador.getLocation());
+                        if (distancia < distanciaMaisProxima) {
+                            distanciaMaisProxima = distancia;
+                            alvoMaisProximo = escondido;
+                        }
+                    }
+
+                    if (alvoMaisProximo != null) {
+                        pegador.setCompassTarget(alvoMaisProximo.getLocation());
+                    }
+                }
+            }
+        };
+        atualizadorBussola.runTaskTimer(this, 0L, 20L);
+    }
+
+    private void pararJogo() {
+        reiniciarJogo();
+        Bukkit.broadcastMessage(ChatColor.RED + "O jogo foi encerrado!");
+
+        Bukkit.getOnlinePlayers().forEach(p -> {
+            removerDisfarce(p);
+            p.setGameMode(GameMode.SURVIVAL);
+        });
+    }
+
+    private void pausarJogo() {
+        if (!jogoAtivo) return;
+
+        jogoPausado = !jogoPausado;
+        String status = jogoPausado ? "pausado" : "retomado";
+        Bukkit.broadcastMessage(ChatColor.YELLOW + "O jogo foi " + status + "!");
+    }
+
+    private String formatarTempo(int segundos) {
+        int minutos = segundos / 60;
+        int segundosRestantes = segundos % 60;
+        return String.format("%02d:%02d", minutos, segundosRestantes);
+    }
+
+    private void iniciarAtualizacoes() {
+        atualizadorTempo = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (!jogoAtivo || jogoPausado) {
+                    return;
+                }
+
+                tempoRestante--;
+
+                // Atualiza a action bar com informações importantes
+                String actionMsg = ChatColor.GREEN + "Jogadores: " + playersRestantes.size() +
+                        " | Tempo: " + formatarTempo(tempoRestante);
+                Bukkit.getOnlinePlayers().forEach(p -> p.sendActionBar(actionMsg));
+
+                // Mensagens importantes durante o jogo
+                if (tempoRestante == 300) { // 5 minutos
+                    Bukkit.broadcastMessage(ChatColor.YELLOW + "5 minutos restantes!");
+                } else if (tempoRestante == 60) { // 1 minuto
+                    Bukkit.broadcastMessage(ChatColor.YELLOW + "1 minuto restante!");
+                } else if (tempoRestante <= 10 && tempoRestante > 0) { // Contagem regressiva
+                    Bukkit.broadcastMessage(ChatColor.YELLOW + "Faltam " + tempoRestante + " segundos!");
+                }
+
+                // Verifica condições de término
+                if (tempoRestante <= 0) {
+                    Bukkit.broadcastMessage(ChatColor.YELLOW + "Os fugitivos venceram! Tempo esgotado.");
+                    pararJogo();
+                } else if (playersRestantes.isEmpty()) {
+                    Bukkit.broadcastMessage(ChatColor.GOLD + "O pegador venceu! Todos foram pegos!");
+                    pararJogo();
+                }
+            }
+        };
+        atualizadorTempo.runTaskTimer(this, 0L, 20L);
+    }
+
+    private void disfarcarJogador(Player jogador) {
+        Random random = new Random();
+        Material blocoAleatorio = blocosPossiveis.get(random.nextInt(blocosPossiveis.size()));
+        MiscDisguise disfarce = new MiscDisguise(DisguiseType.FALLING_BLOCK, blocoAleatorio);
+        DisguiseAPI.disguiseToAll(jogador, disfarce);
+    }
+
+    private void removerDisfarce(Player jogador) {
+        DisguiseAPI.undisguiseToAll(jogador);
+    }
+
+    private void atualizarBlocos() {
+        playersRestantes.forEach(p -> {
+            removerDisfarce(p);
+            disfarcarJogador(p);
+            p.sendMessage(ChatColor.AQUA + "Seu bloco foi atualizado!");
+        });
+    }
+
+    private void iniciarAtualizacaoAutomaticaBlocos() {
+        atualizadorBlocos = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (!jogoAtivo || jogoPausado) return;
+                atualizarBlocos();
+            }
+        };
+        atualizadorBlocos.runTaskTimer(this, 0L, 20L * 60); // Atualiza a cada minuto
+    }
+
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage("Apenas jogadores podem usar esse comando.");
+            return true;
+        }
+
+        Player jogador = (Player) sender;
+        String nomeComando = command.getName().toLowerCase();
+
+        switch (nomeComando) {
+            case "startgame":
+                if (!jogador.hasPermission("hideandseek.startgame")) {
+                    jogador.sendMessage(ChatColor.RED + "Você não tem permissão para isso!");
+                    return true;
+                }
+                iniciarJogo();
+                return true;
+
+            case "stopgame":
+                if (!jogador.hasPermission("hideandseek.stopgame")) {
+                    jogador.sendMessage(ChatColor.RED + "Você não tem permissão para isso!");
+                    return true;
+                }
+                pararJogo();
+                return true;
+
+            case "pausegame":
+                if (!jogador.hasPermission("hideandseek.pausegame")) {
+                    jogador.sendMessage(ChatColor.RED + "Você não tem permissão para isso!");
+                    return true;
+                }
+                pausarJogo();
+                return true;
+
+            default:
+                jogador.sendMessage(ChatColor.RED + "Comando desconhecido.");
+                return false;
+        }
+    }
+
+    @EventHandler
+    public void aoTocar(EntityDamageByEntityEvent e) {
+        if (!jogoAtivo || jogoPausado) return;
+        if (!(e.getDamager() instanceof Player) || !(e.getEntity() instanceof Player)) return;
+
+        Player atacante = (Player) e.getDamager();
+        Player alvo = (Player) e.getEntity();
+
+        if (!pegadores.contains(atacante)) return;
+
+        if (playersRestantes.contains(alvo)) {
+            playersRestantes.remove(alvo);
+            removerDisfarce(alvo);
+            alvo.sendMessage(ChatColor.RED + "Você foi pego!");
+            alvo.setGameMode(GameMode.SPECTATOR);
+
+            // Mensagem para todos
+            Bukkit.broadcastMessage(ChatColor.YELLOW + alvo.getName() + " foi pego! Restam " + playersRestantes.size() + " jogadores.");
+
+            if (playersRestantes.isEmpty()) {
+                Bukkit.broadcastMessage(ChatColor.GOLD + "O pegador venceu! Todos foram pegos!");
+                pararJogo();
+            }
+        }
+    }
+}
